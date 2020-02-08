@@ -1,0 +1,159 @@
+# -*- coding: utf-8 -*-
+
+import os
+import constant
+import pandas as pd
+from tools import clean_text, split_train_test, get_word_list_from_data, \
+    extract_feat_from_data, get_best_model
+import nltk
+from nltk.text import TextCollection
+from sklearn.naive_bayes import GaussianNB
+from sklearn.linear_model import LogisticRegression
+from sklearn import svm
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.decomposition import PCA
+
+
+def main():
+    
+    # Step 1: process data sets
+    print('===Step1: process data sets===')
+
+    if not os.path.exists(constant.cln_text_csv_file):
+        print('data cleaning...')
+        # read csv
+        raw_text_df = pd.read_csv(constant.raw_text_csv_file)
+
+        # clean raw data
+        cln_text_df = clean_text(raw_text_df)
+
+        # save data
+        cln_text_df.to_csv(constant.cln_text_csv_file, index=None)
+        print('save as', constant.cln_text_csv_file)
+
+    print('================\n')
+
+    # Step 2.train part of data
+    print('===Step2. look into datasets===')
+    text_data = pd.read_csv(constant.cln_text_csv_file)
+    text_data['date'] = pd.to_datetime(text_data['date'])
+    text_data.set_index('date', inplace=True)
+    print('number of samples：')
+    print(text_data.groupby('label').size())
+
+    # Step 3. split and train data sets
+    print('===Step3. split===')
+    train_text_df, test_text_df = split_train_test(text_data)
+    print('number of traning sets：')
+    print(train_text_df.groupby('label').size())
+    print('number of test data sets：')
+    print(test_text_df.groupby('label').size())
+    print('================\n')
+
+    # Step 4. extract features
+    print('===Step4. extract features===')
+    n_common_words = 200
+    print('frequency of word...')
+    all_words_in_train = get_word_list_from_data(train_text_df)
+    fdisk = nltk.FreqDist(all_words_in_train)
+    common_words_freqs = fdisk.most_common(n_common_words)
+    print('the most common word is {}：'.format(n_common_words))
+    for word, count in common_words_freqs:
+        print('{}: {}times'.format(word, count))
+    print()
+
+    # extract features
+    text_collection = TextCollection(train_text_df['text'].values.tolist())
+    print('extract features...')
+    train_X, train_y = extract_feat_from_data(train_text_df, text_collection, common_words_freqs)
+    print('Done')
+    print()
+
+    print('test sample...')
+    test_X, test_y = extract_feat_from_data(test_text_df, text_collection, common_words_freqs)
+    print('Done')
+    print('================\n')
+
+    # feature processing 
+    scaler = StandardScaler()
+    tr_feat_scaled = scaler.fit_transform(train_X)
+    te_feat_scaled = scaler.transform(test_X)
+
+    # 3.6 choose of feature
+    sel = VarianceThreshold(threshold=(.8 * (1 - .8)))
+    tr_feat_scaled_sel = sel.fit_transform(tr_feat_scaled)
+    te_feat_scaled_sel = sel.transform(te_feat_scaled)
+
+    # 3.7 PCA
+    pca = PCA(n_components=0.95)  
+    tr_feat_scaled_sel_pca = pca.fit_transform(tr_feat_scaled_sel)
+    te_feat_scaled_sel_pca = pca.transform(te_feat_scaled_sel)
+    print('End of process features')
+    print('dimension of featues：', tr_feat_scaled_sel_pca.shape[1])
+
+    # Step 5. training models
+    models = []
+    print('===Step5.training models ===')
+    print('1. naive bayes：')
+    gnb_model = GaussianNB()
+    gnb_model.fit(tr_feat_scaled_sel_pca, train_y)
+    models.append(['naive bayes', gnb_model])
+    print('Done')
+    print()
+
+    print('2. logistic regression：')
+    lr_param_grid = [
+        {'C': [1e-3, 1e-2, 1e-1, 1, 10, 100]}
+    ]
+    lr_model = LogisticRegression()
+    best_lr_model = get_best_model(lr_model,
+                                   tr_feat_scaled_sel_pca, train_y,
+                                   lr_param_grid, cv=3)
+    models.append(['logistic regression', best_lr_model])
+    print('Done')
+    print()
+
+    print('3. SVM：')
+    svm_param_grid = [
+        {'C': [1e-2, 1e-1, 1, 10, 100], 'gamma': [0.001, 0.0001], 'kernel': ['rbf']},
+    ]
+    svm_model = svm.SVC(probability=True)
+    best_svm_model = get_best_model(svm_model,
+                                    tr_feat_scaled_sel_pca, train_y,
+                                    svm_param_grid, cv=3)
+    models.append(['SVM', best_svm_model])
+    print('Done')
+    print()
+
+    print('4.Random forest：')
+    rf_param_grid = [
+        {'n_estimators': [10, 50, 100, 150, 200]}
+    ]
+
+    rf_model = RandomForestClassifier()
+    best_rf_model = get_best_model(rf_model,
+                                   tr_feat_scaled_sel_pca, train_y,
+                                   rf_param_grid, cv=3)
+    rf_model.fit(tr_feat_scaled_sel_pca, train_y)
+    models.append(['Random forest', best_rf_model])
+    print('Done')
+    print()
+
+    # Step 6. train models
+    print('===Step6.train models ===')
+    for i, model in enumerate(models):
+        print('{}-{}'.format(i + 1, model[0]))
+        # accuracy
+        print('accuracy：', accuracy_score(test_y, model[1].predict(te_feat_scaled_sel_pca)))
+        print('AUC：', roc_auc_score(test_y, model[1].predict_proba(te_feat_scaled_sel_pca)[:, 0]))
+        # 
+        print('confusion_matrix')
+        print(confusion_matrix(test_y, model[1].predict(te_feat_scaled_sel_pca)))
+        print()
+
+
+if __name__ == '__main__':
+    main()
